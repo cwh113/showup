@@ -456,11 +456,12 @@ function stepSummary(x, stage) {
 function defaultMode(k) { return S.modeOverride[k] || (isTravel(k) ? 'travel' : 'planned'); }
 
 /* ═══════════════════════ OURA ═══════════════════════ */
+const OURA_CLIENT_ID = '8c742b04-eefb-453e-8436-4e14890c1d7b'; // public ID, safe to ship (no secret in this app)
 const redirectUri = () => location.origin + location.pathname;
 function ouraToken() { try { const o = JSON.parse(localStorage.getItem(OURA_TOKEN)); if (o && o.token && o.expires > Date.now()) return o; } catch (e) {} return null; }
 function ouraCache() { try { return JSON.parse(localStorage.getItem(OURA_CACHE)); } catch (e) { return null; } }
 function ouraConnect() {
-  const id = (S.settings.ouraClientId || '').trim();
+  const id = (S.settings.ouraClientId || OURA_CLIENT_ID).trim();
   if (!id) { toast('Add your Oura Client ID first'); return; }
   const st = Math.random().toString(36).slice(2);
   sessionStorage.setItem('oura_state', st);
@@ -741,7 +742,7 @@ function renderSettings() {
     ${c && c.error ? `<div class="small" style="color:var(--warn);margin-top:6px">${esc(c.error)}</div>` : ''}
     ${c && c.fetchedAt && !c.error ? `<div class="small muted">Last sync ${new Date(c.fetchedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div>` : ''}
     <label class="f" for="oid">Oura Client ID</label>
-    <input type="text" id="oid" value="${esc(S.settings.ouraClientId)}" placeholder="From cloud.ouraring.com/oauth/applications" onchange="S.settings.ouraClientId=this.value.trim();save()">
+    <input type="text" id="oid" value="${esc(S.settings.ouraClientId)}" placeholder="Using Show Up's built-in ID" onchange="S.settings.ouraClientId=this.value.trim();save()">
     <div class="small muted" style="margin-top:6px">Redirect URI to enter in Oura: <code>${esc(redirectUri())}</code></div>
     <div class="row" style="margin-top:10px">
       <button class="sbtn" onclick="ouraConnect()">${tk ? 'Reconnect' : 'Connect'}</button>
