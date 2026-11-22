@@ -484,7 +484,8 @@ function handleOuraRedirect() {
   }
 }
 async function ouraGet(path, params, token) {
-  const r = await fetch('https://api.ouraring.com/v2/usercollection/' + path + '?' + new URLSearchParams(params), { headers: { Authorization: 'Bearer ' + token } });
+  const base = ((S.settings.ouraRelay || '').trim() || 'https://api.ouraring.com').replace(/\/+$/, '');
+  const r = await fetch(base + '/v2/usercollection/' + path + '?' + new URLSearchParams(params), { headers: { Authorization: 'Bearer ' + token } });
   if (r.status === 401) { localStorage.removeItem(OURA_TOKEN); throw new Error('Oura sign-in expired. Reconnect in Settings.'); }
   if (!r.ok) throw new Error('Oura error ' + r.status);
   return r.json();
@@ -513,7 +514,7 @@ async function ouraRefresh(force) {
       sleepHrs: ln && ln.total_sleep_duration ? ln.total_sleep_duration / 3600 : null, series, workouts
     }));
   } catch (e) {
-    const msg = e instanceof TypeError ? 'Couldn\'t reach Oura from this page (it may block web apps). Ask Claude for the relay fix.' : e.message;
+    const msg = e instanceof TypeError ? ((S.settings.ouraRelay || '').trim() ? 'Couldn\'t reach the relay. Check the relay URL below.' : 'Oura blocks direct calls from web apps. Add your relay URL below.') : e.message;
     localStorage.setItem(OURA_CACHE, JSON.stringify(Object.assign(ouraCache() || {}, { error: msg, fetchedAt: Date.now() })));
   }
   ouraBusy = false;
@@ -743,6 +744,8 @@ function renderSettings() {
     ${c && c.fetchedAt && !c.error ? `<div class="small muted">Last sync ${new Date(c.fetchedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div>` : ''}
     <label class="f" for="oid">Oura Client ID</label>
     <input type="text" id="oid" value="${esc(S.settings.ouraClientId)}" placeholder="Using Show Up's built-in ID" onchange="S.settings.ouraClientId=this.value.trim();save()">
+    <label class="f" for="orelay">Relay URL</label>
+    <input type="text" id="orelay" value="${esc(S.settings.ouraRelay || '')}" placeholder="https://showup-oura.yourname.workers.dev" autocapitalize="off" autocorrect="off" onchange="S.settings.ouraRelay=this.value.trim();save();ouraRefresh(true).then(renderSettings)">
     <div class="small muted" style="margin-top:6px">Redirect URI to enter in Oura: <code>${esc(redirectUri())}</code></div>
     <div class="row" style="margin-top:10px">
       <button class="sbtn" onclick="ouraConnect()">${tk ? 'Reconnect' : 'Connect'}</button>
