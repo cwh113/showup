@@ -1,5 +1,5 @@
 // Show Up service worker: works offline in the gym, picks up updates when online.
-const CACHE = 'showup-v2';
+const CACHE = 'showup-v3';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

@@ -805,8 +805,32 @@ function startWorkout() {
   renderStep();
 }
 function fmt(s) { s = Math.max(0, Math.ceil(s)); return `${Math.floor(s / 60)}:${pad(s % 60)}`; }
+/* Save your place so iOS closing the app mid-workout doesn't lose it. */
+const WKEY = 'showup_workout';
+function persistW() {
+  try {
+    if (!W) { localStorage.removeItem(WKEY); return; }
+    localStorage.setItem(WKEY, JSON.stringify({ k: W.k, stage: W.stage, mode: W.mode, i: W.i, setsDone: W.setsDone, timer: W.timer, completed: W.completed, checks: W.checks, restEndsAt: W.restEndsAt || 0, savedAt: Date.now() }));
+  } catch (e) {}
+}
+function resumeWorkout() {
+  let o; try { o = JSON.parse(localStorage.getItem(WKEY)); } catch (e) {}
+  if (!o) return false;
+  const t = today();
+  if (o.k !== t || (S.history[t] && S.history[t].done) || Date.now() - o.savedAt > 4 * 3600e3) { localStorage.removeItem(WKEY); return false; }
+  W = buildWorkout(t, o.stage, o.mode);
+  Object.assign(W, { i: Math.min(o.i, W.steps.length - 1), setsDone: o.setsDone || 0, timer: o.timer, completed: o.completed || 0, checks: o.checks || {}, restEndsAt: 0 });
+  todayMode = o.mode;
+  document.getElementById('ov-workout').classList.add('show');
+  keepAwake();
+  renderStep();
+  if (o.restEndsAt > Date.now()) showRest((o.restEndsAt - Date.now()) / 1000);
+  toast('Picked up where you left off');
+  return true;
+}
 function renderStep() {
   clearInterval(tick);
+  persistW();
   const x = W.steps[W.i], el = document.getElementById('w-inner');
   const prog = (W.i / W.steps.length) * 100;
   let body = '';
@@ -888,6 +912,7 @@ function setDone() {
 let restTick = null;
 function showRest(secs) {
   const r = document.getElementById('rest'), endsAt = Date.now() + secs * 1000;
+  if (W) { W.restEndsAt = endsAt; persistW(); }
   r.innerHTML = `<div class="eyebrow" style="color:#c8bfb4">Rest</div><div class="clock" id="rclock">${fmt(secs)}</div><div class="sub" style="color:#c8bfb4">Next set when this hits zero</div><button class="skip" onclick="endRest()">Skip rest</button>`;
   r.classList.add('show');
   clearInterval(restTick);
@@ -897,7 +922,7 @@ function showRest(secs) {
     if (left <= 0) { beep(1040, 250); endRest(); }
   }, 250);
 }
-function endRest() { clearInterval(restTick); document.getElementById('rest').classList.remove('show'); }
+function endRest() { clearInterval(restTick); document.getElementById('rest').classList.remove('show'); if (W && W.restEndsAt) { W.restEndsAt = 0; persistW(); } }
 function toggleTimer() {
   const T = W.timer;
   if (T.running) { T.left = (T.endsAt - Date.now()) / 1000; T.running = false; clearInterval(tick); }
@@ -912,8 +937,9 @@ function runTick() {
     let left = (T.endsAt - Date.now()) / 1000;
     if (left <= 0) {
       if (T.phases && T.p < T.phases.length - 1) {
-        T.p++; T.left = T.phases[T.p].secs; T.endsAt = Date.now() + T.left * 1000;
-        beep(T.phases[T.p].cls === 'work' ? 1200 : 700, 260); renderStep(); return;
+        while (T.p < T.phases.length - 1 && T.endsAt <= Date.now()) { T.p++; T.endsAt += T.phases[T.p].secs * 1000; }
+        T.left = (T.endsAt - Date.now()) / 1000;
+        if (T.left > 0) { beep(T.phases[T.p].cls === 'work' ? 1200 : 700, 260); renderStep(); return; }
       }
       T.running = false; T.left = 0; clearInterval(tick); beep(1040, 400); setTimeout(() => beep(1040, 400), 450);
       const s = document.getElementById('csub'); if (s) s.textContent = 'Time! Tap done when you\'re ready.';
@@ -939,6 +965,7 @@ function quitWorkout() {
     <button class="btn ghost" style="margin-top:8px" onclick="closeSheet();exitWorkout()">Leave</button>`);
 }
 function exitWorkout() {
+  localStorage.removeItem(WKEY);
   clearInterval(tick); endRest();
   document.getElementById('ov-workout').classList.remove('show');
   try { wakeLock && wakeLock.release(); } catch (e) {}
@@ -959,6 +986,7 @@ const TIPS = [
   'Your resting heart rate will drift down over months. Check the Oura trend.'
 ];
 function finishWorkout(kind) {
+  localStorage.removeItem(WKEY);
   clearInterval(tick); endRest();
   try { wakeLock && wakeLock.release(); } catch (e) {}
   const t = today();
@@ -1125,6 +1153,7 @@ handleOuraRedirect();
 if (S.modeOverride && !S.modeOverride[today()]) { S.modeOverride = {}; save(); }
 render();
 if (!S.startDate) onboard();
+else resumeWorkout();
 ouraRefresh(false);
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
