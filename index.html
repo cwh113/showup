@@ -137,7 +137,7 @@ a{color:var(--ink2)}
 
 /* settings */
 label.f{display:block;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink4);margin:12px 0 5px}
-input[type=text],input[type=date],select{width:100%;padding:11px 12px;border:1px solid var(--rule2);border-radius:12px;background:#fffdf8;font-family:inherit;font-size:15px;color:var(--ink)}
+input[type=text],input[type=password],input[type=date],select{width:100%;padding:11px 12px;border:1px solid var(--rule2);border-radius:12px;background:#fffdf8;font-family:inherit;font-size:15px;color:var(--ink)}
 .row{display:flex;gap:8px;align-items:center}
 .row>*{flex:1;min-width:0}
 .row>button.sbtn.light[style*="flex:0"]{flex:0 0 auto}
@@ -256,7 +256,113 @@ function loadState() {
   } catch (e) {}
   return defaults();
 }
-function save() { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} }
+function save() { S.savedAt = Date.now(); try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} scheduleSync(); }
+
+/* ═══════════════════════ AUTO-BACKUP → private GitHub repo ═══════════════════════
+   showup.json = latest copy (every change, ~10 s after). backups/YYYY-MM-DD.json = daily snapshot.
+   The token is kept only on this phone (never written into the backup). */
+const GH_TOKEN = 'showup_gh_token', SYNC_STATUS = 'showup_sync';
+let syncReady = false, syncTimer = null, syncBusy = false;
+const ghRepo = () => (S.settings.ghRepo || 'cwh113/showup-data').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
+const ghToken = () => (localStorage.getItem(GH_TOKEN) || '').trim();
+const syncOn = () => !!(ghToken() && ghRepo());
+function syncStatus() { try { return JSON.parse(localStorage.getItem(SYNC_STATUS)) || {}; } catch (e) { return {}; } }
+function setSyncStatus(o) { localStorage.setItem(SYNC_STATUS, JSON.stringify(Object.assign(syncStatus(), o))); if (typeof currentView !== 'undefined' && currentView === 'settings' && !W) renderSettings(); }
+const b64e = str => btoa(unescape(encodeURIComponent(str)));
+const b64d = b64 => decodeURIComponent(escape(atob(b64.replace(/\s/g, ''))));
+async function gh(path, opts = {}) {
+  const r = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/${path}`, Object.assign({}, opts, {
+    headers: { Authorization: 'Bearer ' + ghToken(), Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, cache: 'no-store'
+  }));
+  const j = await r.json().catch(() => ({}));
+  return { r, j };
+}
+function ghErr(r, j) {
+  if (r.status === 401) return 'GitHub token is invalid or expired. Paste a new one.';
+  if (r.status === 403) return 'Token can\'t write to ' + ghRepo() + '. Check it has Contents: Read and write.';
+  if (r.status === 404) return 'Can\'t find ' + ghRepo() + '. Check the repo name and that the token includes it.';
+  return (j && j.message) || ('GitHub error ' + r.status);
+}
+async function ghGetFile(path) {
+  const { r, j } = await gh(path);
+  if (r.status === 404 && j && /Not Found/i.test(j.message || '')) {
+    // Repo reachable but file missing? Check the repo itself so a bad repo name isn't mistaken for "no backup yet".
+    const rr = await fetch(`https://api.github.com/repos/${ghRepo()}`, { headers: { Authorization: 'Bearer ' + ghToken(), Accept: 'application/vnd.github+json' }, cache: 'no-store' });
+    if (!rr.ok) throw new Error(ghErr(rr, {}));
+    return null;
+  }
+  if (!r.ok) throw new Error(ghErr(r, j));
+  return { sha: j.sha, data: JSON.parse(b64d(j.content || '')) };
+}
+async function ghPutFile(path, obj, sha, msg) {
+  const body = { message: msg, content: b64e(JSON.stringify(obj, null, 1)) };
+  if (sha) body.sha = sha;
+  return gh(path, { method: 'PUT', body: JSON.stringify(body) });
+}
+function scheduleSync() { if (!syncReady || !syncOn()) return; clearTimeout(syncTimer); syncTimer = setTimeout(() => pushSync(), 10000); }
+async function pushSync() {
+  if (!syncReady || !syncOn() || syncBusy) return;
+  clearTimeout(syncTimer); syncTimer = null; syncBusy = true;
+  try {
+    const st = syncStatus();
+    let { r, j } = await ghPutFile('showup.json', S, st.sha, `Backup ${new Date().toLocaleString('en-US')}`);
+    if (r.status === 409 || r.status === 422) { // someone (another phone) changed it: merge, then retry once
+      const cur = await ghGetFile('showup.json');
+      if (cur) mergeRemote(cur.data);
+      try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {}
+      ({ r, j } = await ghPutFile('showup.json', S, cur && cur.sha, `Backup ${new Date().toLocaleString('en-US')}`));
+    }
+    if (!r.ok) throw new Error(ghErr(r, j));
+    const upd = { ok: true, msg: '', pushedAt: Date.now(), sha: j.content && j.content.sha };
+    const day = today();
+    if (st.snapDay !== day) {
+      const snap = await gh(`backups/${day}.json`);
+      const put = await ghPutFile(`backups/${day}.json`, S, snap.r.ok ? snap.j.sha : null, `Daily snapshot ${day}`);
+      if (put.r.ok) upd.snapDay = day;
+    }
+    setSyncStatus(upd);
+  } catch (e) { setSyncStatus({ ok: false, msg: e instanceof TypeError ? 'Couldn\'t reach GitHub (offline?). Will retry.' : e.message }); }
+  syncBusy = false;
+}
+// Always pull before the first push, so a fresh phone never overwrites the backup with an empty copy.
+async function pullSync(announce) {
+  if (!syncOn()) return false;
+  try {
+    const cur = await ghGetFile('showup.json');
+    let restored = false;
+    if (cur && cur.data && cur.data.history) restored = mergeRemote(cur.data);
+    syncReady = true;
+    setSyncStatus({ ok: true, msg: '', pulledAt: Date.now(), sha: cur ? cur.sha : null });
+    save();
+    if (announce) toast(restored ? 'Restored from your GitHub backup' : 'Auto-backup is on');
+    if (!W) render();
+    return true;
+  } catch (e) {
+    setSyncStatus({ ok: false, msg: e instanceof TypeError ? 'Couldn\'t reach GitHub (offline?).' : e.message });
+    if (announce) toast(e instanceof TypeError ? 'Couldn\'t reach GitHub' : e.message);
+    return false;
+  }
+}
+function mergeRemote(R) {
+  const before = Object.keys(S.history).filter(k => S.history[k].done).length;
+  const remoteNewer = (R.savedAt || 0) > (S.savedAt || 0);
+  const history = Object.assign({}, R.history || {}, S.history);
+  for (const k in (R.history || {})) if (R.history[k] && R.history[k].done && !(S.history[k] && S.history[k].done)) history[k] = R.history[k];
+  const base = remoteNewer ? R : S, d = defaults();
+  S = Object.assign(d, base, {
+    history,
+    startDate: [S.startDate, R.startDate].filter(Boolean).sort()[0] || null,
+    weights: remoteNewer ? Object.assign({}, S.weights, R.weights) : Object.assign({}, R.weights, S.weights),
+    seenMilestones: [...new Set([...(S.seenMilestones || []), ...(R.seenMilestones || [])])],
+    settings: Object.assign(d.settings, base.settings || {}, { ghRepo: S.settings.ghRepo || (R.settings || {}).ghRepo }),
+    goal: Math.max(S.goal || 7, R.goal || 7),
+    savedAt: Math.max(S.savedAt || 0, R.savedAt || 0)
+  });
+  return Object.keys(S.history).filter(k => S.history[k].done).length > before;
+}
+function setGhToken(v) { localStorage.setItem(GH_TOKEN, v.trim()); syncReady = false; localStorage.removeItem(SYNC_STATUS); pullSync(true); }
+function setGhRepo(v) { S.settings.ghRepo = v.trim(); syncReady = false; localStorage.removeItem(SYNC_STATUS); save(); pullSync(true); }
+function ago(t) { if (!t) return 'never'; const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; }
 
 /* ═══════════════════════ YOUR PLAN (from Google Calendar → Other Calendar) ═══════════════════════ */
 const DAYS = {
@@ -752,6 +858,21 @@ function renderSettings() {
       ${tk ? `<button class="sbtn light" onclick="ouraRefresh(true).then(renderSettings)">Sync now</button><button class="sbtn light" onclick="localStorage.removeItem('${OURA_TOKEN}');localStorage.removeItem('${OURA_CACHE}');renderSettings()">Disconnect</button>` : ''}
     </div>
   </div>
+  <div class="card"><h3>☁️ Auto-backup to GitHub</h3>
+    ${(() => { const ss = syncStatus();
+      if (!syncOn()) return '<div class="small muted">Off. Add a token below and every change saves to your private repo.</div>';
+      if (ss.ok === false) return `<div class="small" style="color:var(--warn)">${esc(ss.msg || 'Backup failed')}</div>`;
+      return `<div class="small" style="color:var(--go)">On · last backup ${ago(ss.pushedAt || ss.pulledAt)}${ss.snapDay ? ' · daily snapshot ' + shortDate(ss.snapDay) : ''}</div>`; })()}
+    <label class="f" for="ghrepo">Private repo</label>
+    <input type="text" id="ghrepo" value="${esc(ghRepo())}" autocapitalize="off" autocorrect="off" onchange="setGhRepo(this.value)">
+    <label class="f" for="ghtok">GitHub token (stays on this phone)</label>
+    <input type="password" id="ghtok" value="${esc(ghToken())}" placeholder="github_pat_…" autocapitalize="off" autocorrect="off" onchange="setGhToken(this.value)">
+    <div class="row" style="margin-top:10px">
+      <button class="sbtn" onclick="syncReady?pushSync().then(()=>toast(syncStatus().ok?'Backed up':'Backup failed')):pullSync(true)">Back up now</button>
+      ${syncOn() ? `<a class="sbtn light" style="text-align:center;text-decoration:none" href="https://github.com/${esc(ghRepo())}/commits/main" target="_blank" rel="noopener">View history ↗</a>` : ''}
+    </div>
+    <div class="small muted" style="margin-top:8px">New phone? Paste the same token and your history comes back.</div>
+  </div>
   <div class="card"><h3>Your plan</h3><div class="small muted">From your Google Calendar (Other Calendar). The app ramps up to this.</div>
     ${[0, 1, 2, 3, 4, 5, 6].map(d => `<details><summary>${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d]} · Day ${DAYS[d].n}: ${esc(DAYS[d].title)}</summary><p>${esc(DAYS[d].cal)}</p></details>`).join('')}
   </div>
@@ -1102,7 +1223,22 @@ function onboard() {
     <div class="small muted" style="margin:6px 2px 12px">Commit to a streak goal:</div>
     <button class="btn primary" onclick="commit(7)">I commit to 7 days</button>
     <div class="alt"><button onclick="commit(14)">14 days</button><button onclick="commit(30)">30 days</button></div>
+    <button class="skip" style="display:block;margin:14px auto 0" onclick="restoreSheet()">Restore from GitHub backup</button>
   </div>`;
+}
+function restoreSheet() {
+  sheet(`<h3>Restore from backup</h3>
+    <label class="f" for="r-repo">Private repo</label><input type="text" id="r-repo" autocapitalize="off" autocorrect="off" value="${esc(ghRepo())}">
+    <label class="f" for="r-tok">GitHub token</label><input type="password" id="r-tok" autocapitalize="off" autocorrect="off" value="${esc(ghToken())}">
+    <button class="btn primary" onclick="doRestore()">Restore</button>`);
+}
+async function doRestore() {
+  S.settings.ghRepo = document.getElementById('r-repo').value.trim();
+  localStorage.setItem(GH_TOKEN, document.getElementById('r-tok').value.trim());
+  syncReady = false;
+  const ok = await pullSync(true);
+  if (ok && S.startDate) { closeSheet(); document.getElementById('ov-onboard').classList.remove('show'); render(); }
+  else if (ok) toast('No backup found yet in that repo');
 }
 function commit(n) {
   // Committing late in the evening? Start tomorrow so tonight doesn't count as a miss.
@@ -1142,7 +1278,8 @@ function render() {
 }
 let lastDay = today();
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible') return;
+  if (document.visibilityState !== 'visible') { if (syncTimer) pushSync(); return; }
+  if (syncOn() && (!syncReady || Date.now() - (syncStatus().pulledAt || 0) > 10 * 60e3)) pullSync(false);
   if (today() !== lastDay) { lastDay = today(); todayMode = null; }
   if (!W) render();
   ouraRefresh(false);
@@ -1150,6 +1287,8 @@ document.addEventListener('visibilitychange', () => {
 
 /* ═══════════════════════ BOOT ═══════════════════════ */
 handleOuraRedirect();
+try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
+if (syncOn()) pullSync(false);
 if (S.modeOverride && !S.modeOverride[today()]) { S.modeOverride = {}; save(); }
 render();
 if (!S.startDate) onboard();
