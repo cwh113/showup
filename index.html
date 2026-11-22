@@ -285,7 +285,7 @@ function ghErr(r, j) {
 }
 async function ghGetFile(path) {
   const { r, j } = await gh(path);
-  if (r.status === 404 && j && /Not Found/i.test(j.message || '')) {
+  if (r.status === 404) { // file missing, or repo still empty ("This repository is empty.")
     // Repo reachable but file missing? Check the repo itself so a bad repo name isn't mistaken for "no backup yet".
     const rr = await fetch(`https://api.github.com/repos/${ghRepo()}`, { headers: { Authorization: 'Bearer ' + ghToken(), Accept: 'application/vnd.github+json' }, cache: 'no-store' });
     if (!rr.ok) throw new Error(ghErr(rr, {}));
